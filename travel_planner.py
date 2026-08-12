@@ -57,7 +57,7 @@ def get_travel_recommendation(api_key, travel_date):
         url,
         headers=headers,
         json=data,
-        timeout=30
+        timeout=60
     )
 
     return response
@@ -78,7 +78,7 @@ def search_kakao_places(api_key, query):
         url,
         headers=headers,
         params=params,
-        timeout=30
+        timeout=60
     )
 
     return response
@@ -102,6 +102,95 @@ def extract_restaurants(kakao_response):
         restaurants.append(restaurant)
 
     return restaurants
+
+
+def create_final_report(api_key, travel_date, recommendation, restaurants):
+    url = "https://api.openai.com/v1/responses"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    restaurants_text = json.dumps(
+        restaurants,
+        ensure_ascii=False,
+        indent=2
+    )
+
+    prompt = f"""
+여행 날짜: {travel_date}
+
+다음은 1차 여행 추천 정보입니다.
+
+추천 지역: {recommendation["recommended_city"]}
+날씨: {recommendation["weather"]}
+행사/축제: {recommendation["events"]}
+추천 이유: {recommendation["reason"]}
+
+다음은 Kakao Local API에서 검색한 맛집 정보입니다.
+
+{restaurants_text}
+
+위 정보를 바탕으로 국내 1일 여행 리포트를 작성해주세요.
+
+반드시 다음 내용을 포함해주세요.
+
+1. 추천 지역
+2. 추천 이유
+3. 날씨 요약
+4. 행사 또는 축제
+5. 맛집 추천
+6. 오전, 점심, 오후, 저녁으로 구성된 1일 일정
+
+Markdown 형식으로 작성해주세요.
+"""
+
+    data = {
+        "model": "gpt-5-mini",
+        "input": prompt
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=data,
+        timeout=60
+    )
+
+    return response
+
+def save_json_result(travel_date, recommendation, restaurants):
+    os.makedirs("results", exist_ok=True)
+
+    result_data = {
+        "date": travel_date,
+        "recommendation": recommendation,
+        "restaurants": restaurants,
+        "errors": []
+    }
+
+    file_path = f"results/{travel_date}_travel_data.json"
+
+    with open(file_path, "w", encoding="utf-8") as file:
+        json.dump(
+            result_data,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    return file_path
+
+def save_markdown_report(travel_date, final_report):
+    os.makedirs("results", exist_ok=True)
+
+    file_path = f"results/{travel_date}_travel_plan.md"
+
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write(final_report)
+
+    return file_path
 
 def main():
     load_dotenv()
@@ -171,6 +260,38 @@ def main():
 
         else:
             print("Kakao API Key가 설정되지 않았습니다.")
+
+
+    final_response = create_final_report(
+        openai_api_key,
+        args.date,
+        recommendation,
+        restaurants
+    )
+
+    print("\n최종 리포트 API 상태 코드:", final_response.status_code)
+
+    final_data = final_response.json()
+
+    final_report = final_data["output"][1]["content"][0]["text"]
+
+    print("\n========== 최종 여행 리포트 ==========\n")
+    print(final_report)
+
+    json_file = save_json_result(
+        args.date,
+        recommendation,
+        restaurants
+    )
+
+    markdown_file = save_markdown_report(
+        args.date,
+        final_report
+    )
+
+    print("\n파일 저장 완료")
+    print("JSON:", json_file)
+    print("Markdown:", markdown_file)    
 
 if __name__ == "__main__":
     main()
