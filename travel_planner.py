@@ -14,7 +14,7 @@ def validate_date(date_string):
     except ValueError:
         return False
 
-def get_travel_recommendation(api_key, travel_date):
+def get_travel_recommendation(api_key, travel_date, retry=False):
     url = "https://api.openai.com/v1/responses"
 
     headers = {
@@ -22,6 +22,21 @@ def get_travel_recommendation(api_key, travel_date):
         "Content-Type": "application/json"
     }
 
+    retry_instruction = ""
+
+    if retry:
+        retry_instruction = """
+    이전 응답은 JSON 파싱에 실패했습니다.
+
+    이번에는 반드시 아래 조건을 지켜주세요.
+
+    - JSON 객체 하나만 출력
+    - ```json 같은 코드 블록 사용 금지
+    - JSON 앞뒤에 설명문 작성 금지
+    - 모든 key와 문자열은 큰따옴표 사용
+    - 마지막 쉼표 사용 금지
+    """
+        
     prompt = f"""
     여행 날짜는 {travel_date}입니다.
 
@@ -46,6 +61,8 @@ def get_travel_recommendation(api_key, travel_date):
     "recommended_city": "부산 (해운대·광안리)"
 
     JSON 이외의 설명은 작성하지 마세요.
+
+    {retry_instruction}
     """
 
     data = {
@@ -70,6 +87,22 @@ def get_travel_recommendation(api_key, travel_date):
     except requests.exceptions.RequestException as error:
         print(f"오류: OpenAI API 호출에 실패했습니다. ({error})")
         return None
+
+def search_places(api_key, query):
+    """
+    장소 검색 공통 인터페이스.
+
+    입력:
+        api_key: 장소 검색 API 인증 키
+        query: 검색할 지역/키워드 문자열
+
+    출력:
+        requests.Response 객체 또는 None
+
+    현재 구현은 Kakao Local API를 사용한다.
+    다른 장소 검색 API로 교체할 경우 이 함수 내부의 호출 대상을 변경한다.
+    """
+    return search_kakao_places(api_key, query)
 
 def search_kakao_places(api_key, query):
     url = "https://dapi.kakao.com/v2/local/search/keyword.json"
@@ -121,8 +154,13 @@ def extract_restaurants(kakao_response):
 
     return restaurants
 
-
-def create_final_report(api_key, travel_date, recommendation, restaurants):
+def create_final_report(
+    api_key,
+    travel_date,
+    recommendation,
+    restaurants,
+    errors
+):
     url = "https://api.openai.com/v1/responses"
 
     headers = {
@@ -132,6 +170,12 @@ def create_final_report(api_key, travel_date, recommendation, restaurants):
 
     restaurants_text = json.dumps(
         restaurants,
+        ensure_ascii=False,
+        indent=2
+    )
+
+    errors_text = json.dumps(
+        errors,
         ensure_ascii=False,
         indent=2
     )
@@ -150,6 +194,10 @@ def create_final_report(api_key, travel_date, recommendation, restaurants):
 
 {restaurants_text}
 
+다음은 실행 중 수집된 오류 정보입니다.
+
+{errors_text}
+
 위 정보를 바탕으로 국내 1일 여행 리포트를 작성해주세요.
 
 반드시 다음 내용을 포함해주세요.
@@ -160,6 +208,7 @@ def create_final_report(api_key, travel_date, recommendation, restaurants):
 4. 행사 또는 축제
 5. 맛집 추천
 6. 오전, 점심, 오후, 저녁으로 구성된 1일 일정
+7. 오류 정보가 있다면 마지막에 "오류 및 주의사항" 항목으로 요약
 
 Markdown 형식으로 작성해주세요.
 """
@@ -268,6 +317,22 @@ def parse_recommendation_response(response):
             print(f"오류: 추천 결과에 '{key}' 항목이 없습니다.")
             return None
 
+    if not isinstance(recommendation["recommended_city"], str):
+        print("오류: recommended_city는 문자열이어야 합니다.")
+        return None
+
+    if not isinstance(recommendation["weather"], str):
+        print("오류: weather는 문자열이어야 합니다.")
+        return None
+
+    if not isinstance(recommendation["events"], list):
+        print("오류: events는 리스트여야 합니다.")
+        return None
+
+    if not isinstance(recommendation["reason"], str):
+        print("오류: reason은 문자열이어야 합니다.")
+        return None
+
     return recommendation
 
 def extract_openai_text(response):
@@ -278,6 +343,14 @@ def extract_openai_text(response):
     except (KeyError, IndexError, TypeError):
         print("오류: OpenAI 응답에서 텍스트를 찾지 못했습니다.")
         return None
+
+def normalize_city_name(city):
+    city = city.strip()
+
+    if "(" in city:
+        city = city.split("(")[0].strip()
+
+    return city
       
 def main():
     load_dotenv()
@@ -333,11 +406,31 @@ def main():
     recommendation = parse_recommendation_response(response)
 
     if recommendation is None:
-        print("여행 추천 데이터를 처리하지 못했습니다.")
-        return
+        print("추천 JSON 파싱에 실패했습니다. 1회 재시도합니다.")
 
-    city = recommendation["recommended_city"]
+        retry_response = get_travel_recommendation(
+            openai_api_key,
+            args.date,
+            retry=True
+        )
 
+        if retry_response is None:
+            print("재시도 중 OpenAI 응답을 받지 못했습니다.")
+            return
+
+        if not check_api_response(retry_response, "OpenAI"):
+            return
+
+        recommendation = parse_recommendation_response(retry_response)
+
+        if recommendation is None:
+            print("재시도 후에도 추천 JSON 파싱에 실패했습니다.")
+            return
+
+    city = normalize_city_name(
+        recommendation["recommended_city"]
+    )
+    
     print("추천 지역:", city)
     print("날씨:", recommendation["weather"])
     print("행사:", recommendation["events"])
@@ -345,7 +438,7 @@ def main():
 
     query = f"{city} 맛집"
 
-    kakao_response = search_kakao_places(
+    kakao_response = search_places(
         kakao_api_key,
         query
     )
@@ -382,7 +475,8 @@ def main():
         openai_api_key,
         args.date,
         recommendation,
-        restaurants
+        restaurants,
+        errors
     )
 
     if final_response is None:
@@ -418,6 +512,7 @@ def main():
     print("\n파일 저장 완료")
     print("JSON:", json_file)
     print("Markdown:", markdown_file)    
+
 
 if __name__ == "__main__":
     main()
