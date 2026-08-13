@@ -258,6 +258,33 @@ def save_json_result(travel_date, recommendation, restaurants, errors):
 
     return file_path
 
+def load_json_result(travel_date):
+    """저장된 여행 데이터를 불러온다. 캐시가 없거나 손상되면 None을 반환한다."""
+    file_path = f"results/{travel_date}_travel_data.json"
+
+    if not os.path.exists(file_path):
+        return None
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            result_data = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"캐시 파일을 읽지 못했습니다: {error}")
+        return None
+
+    required_keys = {
+        "date",
+        "recommendation",
+        "restaurants",
+        "errors"
+    }
+
+    if not required_keys.issubset(result_data):
+        print("캐시 파일에 필수 데이터가 없습니다. API를 다시 호출합니다.")
+        return None
+
+    return result_data
+
 def save_markdown_report(travel_date, final_report):
     os.makedirs("results", exist_ok=True)
 
@@ -368,6 +395,12 @@ def main():
         help="여행 날짜를 YYYY-MM-DD 형식으로 입력하세요."
     )
 
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="저장된 JSON 캐시를 무시하고 API를 다시 호출합니다."
+    )
+
     args = parser.parse_args()
 
     if not validate_date(args.date):
@@ -380,6 +413,43 @@ def main():
     if not openai_api_key:
         print("오류: OPENAI_API_KEY가 설정되지 않았습니다.")
         print(".env 파일에 OPENAI_API_KEY를 설정해주세요.")
+        return
+
+    cached_data = None
+
+    if not args.refresh:
+        cached_data = load_json_result(args.date)
+
+    if cached_data is not None:
+        print(f"저장된 JSON 캐시를 불러왔습니다: results/{args.date}_travel_data.json")
+
+        final_response = create_final_report(
+            openai_api_key,
+            cached_data["date"],
+            cached_data["recommendation"],
+            cached_data["restaurants"],
+            cached_data["errors"]
+        )
+
+        if final_response is None:
+            print("캐시 데이터로 최종 여행 리포트를 생성하지 못했습니다.")
+            return
+
+        if not check_api_response(final_response, "OpenAI"):
+            return
+
+        final_report = extract_openai_text(final_response)
+
+        if final_report is None:
+            print("최종 여행 리포트 내용을 가져오지 못했습니다.")
+            return
+
+        print("\n========== 캐시 기반 최종 여행 리포트 ==========\n")
+        print(final_report)
+
+        markdown_file = save_markdown_report(args.date, final_report)
+        print("\nJSON 캐시를 사용해 리포트를 다시 생성했습니다.")
+        print("Markdown:", markdown_file)
         return
 
     if not kakao_api_key:
